@@ -19,6 +19,11 @@ CHAT_ID = os.environ.get("CHAT_ID", "INSERISCI_QUI_IL_CHAT_ID")
 STATE_FILE = Path("known_events.json")
 # ========================================
 
+REGION_NAMES = {
+    "north america", "europe", "oceania",
+    "latin america", "asia", "middle east",
+}
+
 
 def fetch_europe_events():
     """Scarica la pagina ed estrae gli eventi della sezione Europe."""
@@ -33,51 +38,69 @@ def fetch_europe_events():
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # Trova l'intestazione "Europe"
+    # Cerca su qualsiasi tipo di tag con testo "europe" (case-insensitive, normalizzato)
     europe_header = None
-    for tag in soup.find_all(["h4", "h5", "h3"]):
-        if tag.get_text(strip=True).lower() == "europe":
+    for tag in soup.find_all(["h2", "h3", "h4", "h5", "h6", "dt", "strong", "b", "p", "div", "span"]):
+        text = tag.get_text(strip=True).lower()
+        if text == "europe":
             europe_header = tag
             break
 
     if not europe_header:
+        print("DEBUG: header 'Europe' non trovato. Dump dei primi 30 heading:")
+        for tag in soup.find_all(["h2", "h3", "h4", "h5", "h6"])[:30]:
+            print(f"  <{tag.name}> {tag.get_text(strip=True)!r}")
         raise RuntimeError("Sezione 'Europe' non trovata nella pagina")
 
-    # Raccoglie tutti gli h5 (organizzatori) tra "Europe" e la prossima regione
-    next_regions = {"oceania", "latin america", "north america", "asia", "middle east"}
+    print(f"DEBUG: trovato header 'Europe' come <{europe_header.name}>")
+    europe_tag_name = europe_header.name
+
+    # Iteriamo TUTTI gli elementi successivi del documento (non solo siblings).
+    # Ci fermiamo quando troviamo un heading dello stesso tipo che e' un'altra regione.
     events = []
-    current = europe_header.find_next_sibling()
-    while current is not None:
-        text = current.get_text(strip=True).lower()
-        # Stop quando inizia un'altra regione
-        if current.name in ("h4", "h5") and text in next_regions:
+    current_organizer = None
+
+    for el in europe_header.find_all_next():
+        text = el.get_text(strip=True).lower() if el.name else ""
+
+        # Stop: prossima regione
+        if el.name == europe_tag_name and text in REGION_NAMES and text != "europe":
             break
-        if current.name == "h5":
-            organizer = current.get_text(strip=True)
-            # Cerca data e venue nel <dl> successivo
-            dl = current.find_next_sibling("dl")
-            date_str, venue = "", ""
-            if dl:
-                dds = dl.find_all("dd")
-                full_text = " | ".join(dd.get_text(" ", strip=True) for dd in dds)
-                m_date = re.search(r"Date:\s*([^|]+)", full_text)
-                if m_date:
-                    date_str = m_date.group(1).strip()
-                m_venue = re.search(r"Venue:\s*([^|]+)", full_text)
-                if m_venue:
-                    venue = m_venue.group(1).strip()
+
+        # Heading che NON e' una regione = nome organizzatore
+        if el.name in ("h3", "h4", "h5", "h6") and text and text not in REGION_NAMES:
+            current_organizer = el.get_text(strip=True)
+            continue
+
+        # <dl> dopo un organizzatore = dettagli evento
+        if el.name == "dl" and current_organizer:
+            full_text = el.get_text(" | ", strip=True)
+            date_str = ""
+            venue = ""
+            m_date = re.search(r"Date:\s*([^|]+?)(?:\s*\||$)", full_text)
+            if m_date:
+                date_str = m_date.group(1).strip()
+            m_venue = re.search(r"Venue:\s*([^|]+?)(?:\s*\||$)", full_text)
+            if m_venue:
+                venue = m_venue.group(1).strip()
+            # Fallback: se non c'e' "Venue:" prendi il secondo dd
+            if not venue:
+                dds = el.find_all("dd")
+                if len(dds) >= 2:
+                    candidate = dds[1].get_text(" ", strip=True)
+                    if "Date:" not in candidate and "Link:" not in candidate:
+                        venue = candidate
             events.append({
-                "organizer": organizer,
+                "organizer": current_organizer,
                 "date": date_str,
                 "venue": venue,
             })
-        current = current.find_next_sibling()
+            current_organizer = None
 
     return events
 
 
 def make_event_key(event):
-    """Chiave univoca per riconoscere un evento (organizzatore + data)."""
     return f"{event['organizer']}|{event['date']}"
 
 
@@ -105,6 +128,12 @@ def send_telegram(message):
 def main():
     events = fetch_europe_events()
     print(f"Trovati {len(events)} eventi Europe sulla pagina.")
+    for e in events:
+        print(f"  - {e['organizer']} | {e['date']} | {e['venue']}")
+
+    if len(events) == 0:
+        print("ATTENZIONE: nessun evento trovato. Probabile cambio struttura HTML.")
+        return
 
     known = load_known()
     new_events = [e for e in events if make_event_key(e) not in known]
@@ -113,13 +142,11 @@ def main():
         print("Nessun nuovo evento.")
         return
 
-    # Primo avvio: salva tutto senza notificare (evita spam con tutti gli eventi gia' presenti)
     if not known:
         print("Primo avvio: salvo gli eventi attuali senza notificare.")
         save_known({make_event_key(e) for e in events})
         return
 
-    # Costruisci messaggio
     lines = [f"🏴‍☠️ <b>Nuovi Regional Europe trovati!</b> ({len(new_events)})\n"]
     for e in new_events:
         lines.append(f"• <b>{e['organizer']}</b>")
@@ -131,7 +158,6 @@ def main():
     send_telegram("\n".join(lines))
     print(f"Notificati {len(new_events)} nuovi eventi.")
 
-    # Aggiorna lo stato
     save_known({make_event_key(e) for e in events})
 
 
@@ -140,7 +166,4 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"ERRORE: {e}", file=sys.stderr)
-        # Se vuoi essere notificato anche degli errori, decommentare:
-        # try: send_telegram(f"⚠️ Errore nel monitor OP TCG: {e}")
-        # except: pass
         sys.exit(1)
