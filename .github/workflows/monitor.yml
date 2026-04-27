@@ -3,7 +3,7 @@ name: OP Regional Monitor
 on:
   schedule:
     # Ogni 6 ore. Modifica come preferisci (formato cron UTC).
-    - cron: '0 */6 * * *'
+    - cron: '0 */3 * * *'
   workflow_dispatch:  # Permette esecuzione manuale dal pulsante Actions
 
 jobs:
