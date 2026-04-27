@@ -1,6 +1,7 @@
 """
 Bot di monitoraggio per i Regional One Piece TCG - sezione Europe.
-Quando trova nuovi eventi nella sezione "Europe", manda una notifica su Telegram.
+- Notifica su Telegram quando trova nuovi eventi
+- Mantiene un messaggio riassunto sempre aggiornato con la lista completa
 """
 
 import json
@@ -17,6 +18,7 @@ URL = "https://en.onepiece-cardgame.com/events/regional-season1-26-27.html"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "INSERISCI_QUI_IL_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID", "INSERISCI_QUI_IL_CHAT_ID")
 STATE_FILE = Path("known_events.json")
+SUMMARY_FILE = Path("summary_message.json")  # memorizza l'ID del messaggio riassunto
 # ========================================
 
 REGION_NAMES = {
@@ -38,7 +40,6 @@ def fetch_europe_events():
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # Cerca su qualsiasi tipo di tag con testo "europe" (case-insensitive, normalizzato)
     europe_header = None
     for tag in soup.find_all(["h2", "h3", "h4", "h5", "h6", "dt", "strong", "b", "p", "div", "span"]):
         text = tag.get_text(strip=True).lower()
@@ -55,24 +56,19 @@ def fetch_europe_events():
     print(f"DEBUG: trovato header 'Europe' come <{europe_header.name}>")
     europe_tag_name = europe_header.name
 
-    # Iteriamo TUTTI gli elementi successivi del documento (non solo siblings).
-    # Ci fermiamo quando troviamo un heading dello stesso tipo che e' un'altra regione.
     events = []
     current_organizer = None
 
     for el in europe_header.find_all_next():
         text = el.get_text(strip=True).lower() if el.name else ""
 
-        # Stop: prossima regione
         if el.name == europe_tag_name and text in REGION_NAMES and text != "europe":
             break
 
-        # Heading che NON e' una regione = nome organizzatore
         if el.name in ("h3", "h4", "h5", "h6") and text and text not in REGION_NAMES:
             current_organizer = el.get_text(strip=True)
             continue
 
-        # <dl> dopo un organizzatore = dettagli evento
         if el.name == "dl" and current_organizer:
             full_text = el.get_text(" | ", strip=True)
             date_str = ""
@@ -83,7 +79,6 @@ def fetch_europe_events():
             m_venue = re.search(r"Venue:\s*([^|]+?)(?:\s*\||$)", full_text)
             if m_venue:
                 venue = m_venue.group(1).strip()
-            # Fallback: se non c'e' "Venue:" prendi il secondo dd
             if not venue:
                 dds = el.find_all("dd")
                 if len(dds) >= 2:
@@ -101,7 +96,12 @@ def fetch_europe_events():
 
 
 def make_event_key(event):
-    return f"{event['organizer']}|{event['date']}"
+    """Chiave univoca: include anche il luogo per renderlo leggibile nel file."""
+    parts = [event['organizer'], event['date']]
+    if event.get('venue'):
+        venue_short = event['venue'][:60].rstrip()
+        parts.append(venue_short)
+    return "|".join(parts)
 
 
 def load_known():
@@ -114,15 +114,115 @@ def save_known(keys):
     STATE_FILE.write_text(json.dumps(sorted(keys), ensure_ascii=False, indent=2))
 
 
+def load_summary_id():
+    if SUMMARY_FILE.exists():
+        return json.loads(SUMMARY_FILE.read_text()).get("message_id")
+    return None
+
+
+def save_summary_id(message_id):
+    SUMMARY_FILE.write_text(json.dumps({"message_id": message_id}, indent=2))
+
+
+# ---------- Telegram helpers ----------
+
+def telegram_request(method, data):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
+    r = requests.post(url, data=data, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
 def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    r = requests.post(url, data={
+    """Manda un nuovo messaggio. Ritorna il message_id."""
+    result = telegram_request("sendMessage", {
         "chat_id": CHAT_ID,
         "text": message,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-    }, timeout=30)
-    r.raise_for_status()
+    })
+    return result["result"]["message_id"]
+
+
+def edit_telegram(message_id, message):
+    """Modifica un messaggio esistente. Ritorna True se ok, False se il messaggio non esiste piu'."""
+    try:
+        telegram_request("editMessageText", {
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        })
+        return True
+    except requests.HTTPError as e:
+        # Telegram restituisce 400 se il messaggio non esiste piu' o e' identico
+        body = e.response.text if e.response is not None else ""
+        if "message is not modified" in body:
+            # Contenuto identico, non e' un errore
+            return True
+        print(f"Impossibile modificare il messaggio {message_id}: {body}")
+        return False
+
+
+# ---------- Costruzione messaggi ----------
+
+def build_summary_message(events):
+    """Messaggio riassunto con la lista completa degli eventi."""
+    from datetime import datetime, timezone, timedelta
+    # Ora italiana (CET/CEST approssimato come UTC+1, va bene per un timestamp)
+    now = datetime.now(timezone.utc) + timedelta(hours=1)
+    timestamp = now.strftime("%d/%m/%Y %H:%M")
+
+    lines = [
+        f"🏴‍☠️ <b>Regional Europe – Stagione 26/27</b>",
+        f"<i>Aggiornato: {timestamp}</i>",
+        "",
+        f"<b>{len(events)} eventi attualmente in programma:</b>",
+        "",
+    ]
+    for e in events:
+        lines.append(f"• <b>{e['organizer']}</b>")
+        lines.append(f"  📅 {e['date']}")
+        if e['venue']:
+            lines.append(f"  📍 {e['venue']}")
+        lines.append("")
+    lines.append(f"🔗 <a href=\"{URL}\">Pagina ufficiale</a>")
+    return "\n".join(lines)
+
+
+def build_new_events_message(new_events):
+    """Notifica per i nuovi eventi appena scoperti."""
+    lines = [f"🆕 <b>Nuovi Regional Europe!</b> ({len(new_events)})\n"]
+    for e in new_events:
+        lines.append(f"• <b>{e['organizer']}</b>")
+        lines.append(f"  📅 {e['date']}")
+        if e['venue']:
+            lines.append(f"  📍 {e['venue']}")
+        lines.append("")
+    lines.append(f"🔗 {URL}")
+    return "\n".join(lines)
+
+
+# ---------- Logica principale ----------
+
+def update_summary(events):
+    """Crea o aggiorna il messaggio riassunto pinnato."""
+    summary_text = build_summary_message(events)
+    summary_id = load_summary_id()
+
+    if summary_id is not None:
+        # Prova ad aggiornare il messaggio esistente
+        if edit_telegram(summary_id, summary_text):
+            print(f"Messaggio riassunto aggiornato (id={summary_id}).")
+            return
+        # Se non riesce (es. messaggio cancellato), ricreiamo
+        print("Messaggio riassunto non piu' modificabile, ne creo uno nuovo.")
+
+    # Crea un nuovo messaggio riassunto
+    new_id = send_telegram(summary_text)
+    save_summary_id(new_id)
+    print(f"Creato nuovo messaggio riassunto (id={new_id}). PINNALO in chat!")
 
 
 def main():
@@ -138,24 +238,22 @@ def main():
     known = load_known()
     new_events = [e for e in events if make_event_key(e) not in known]
 
+    # Aggiorna sempre il messaggio riassunto (con la lista corrente)
+    update_summary(events)
+
+    # Caso 1: primo avvio - salvo lo stato senza mandare notifica "novita'"
+    if not known:
+        print("Primo avvio: salvo gli eventi attuali senza notifica di novita'.")
+        save_known({make_event_key(e) for e in events})
+        return
+
+    # Caso 2: nessuna novita'
     if not new_events:
         print("Nessun nuovo evento.")
         return
 
-    if not known:
-        print("Primo avvio: salvo gli eventi attuali senza notificare.")
-        save_known({make_event_key(e) for e in events})
-        return
-
-    lines = [f"🏴‍☠️ <b>Nuovi Regional Europe trovati!</b> ({len(new_events)})\n"]
-    for e in new_events:
-        lines.append(f"• <b>{e['organizer']}</b>")
-        lines.append(f"  📅 {e['date']}")
-        if e['venue']:
-            lines.append(f"  📍 {e['venue']}")
-        lines.append("")
-    lines.append(f"🔗 {URL}")
-    send_telegram("\n".join(lines))
+    # Caso 3: ci sono novita' - mando notifica separata
+    send_telegram(build_new_events_message(new_events))
     print(f"Notificati {len(new_events)} nuovi eventi.")
 
     save_known({make_event_key(e) for e in events})
