@@ -237,6 +237,7 @@ def main():
 
     known = load_known()
     new_events = [e for e in events if make_event_key(e) not in known]
+    summary_id = load_summary_id()
 
     # Caso 1: primo avvio - creo il messaggio riassunto e salvo lo stato,
     # senza mandare notifica di "novita'"
@@ -246,12 +247,22 @@ def main():
         save_known({make_event_key(e) for e in events})
         return
 
-    # Caso 2: nessuna novita' - non tocco niente, nessun messaggio inviato/modificato
+    # Caso 2: il messaggio riassunto non esiste ancora (es. prima esecuzione
+    # dopo aver cambiato chat o aver perso lo stato). Lo creo senza
+    # mandare notifica di novita'.
+    if summary_id is None:
+        print("Messaggio riassunto mancante: lo creo senza notifica di novita'.")
+        update_summary(events)
+        # Allineo anche known_events giusto per sicurezza
+        save_known({make_event_key(e) for e in events})
+        return
+
+    # Caso 3: nessuna novita' - non tocco niente, nessun messaggio inviato/modificato
     if not new_events:
         print("Nessun nuovo evento. Non invio ne' modifico messaggi.")
         return
 
-    # Caso 3: ci sono novita' - aggiorno il riassunto E mando notifica separata
+    # Caso 4: ci sono novita' - aggiorno il riassunto E mando notifica separata
     update_summary(events)
     send_telegram(build_new_events_message(new_events))
     print(f"Notificati {len(new_events)} nuovi eventi.")
