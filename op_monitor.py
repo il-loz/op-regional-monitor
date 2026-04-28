@@ -238,21 +238,21 @@ def main():
     known = load_known()
     new_events = [e for e in events if make_event_key(e) not in known]
 
-    # Aggiorna sempre il messaggio riassunto (con la lista corrente)
-    update_summary(events)
-
-    # Caso 1: primo avvio - salvo lo stato senza mandare notifica "novita'"
+    # Caso 1: primo avvio - creo il messaggio riassunto e salvo lo stato,
+    # senza mandare notifica di "novita'"
     if not known:
-        print("Primo avvio: salvo gli eventi attuali senza notifica di novita'.")
+        print("Primo avvio: creo il messaggio riassunto e salvo gli eventi attuali.")
+        update_summary(events)
         save_known({make_event_key(e) for e in events})
         return
 
-    # Caso 2: nessuna novita'
+    # Caso 2: nessuna novita' - non tocco niente, nessun messaggio inviato/modificato
     if not new_events:
-        print("Nessun nuovo evento.")
+        print("Nessun nuovo evento. Non invio ne' modifico messaggi.")
         return
 
-    # Caso 3: ci sono novita' - mando notifica separata
+    # Caso 3: ci sono novita' - aggiorno il riassunto E mando notifica separata
+    update_summary(events)
     send_telegram(build_new_events_message(new_events))
     print(f"Notificati {len(new_events)} nuovi eventi.")
 
