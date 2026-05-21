@@ -14,7 +14,7 @@ import requests
 from bs4 import BeautifulSoup
 
 # ============ CONFIGURAZIONE ============
-URL = "https://en.onepiece-cardgame.com/events/regional-season1-26-27.html"
+URL = "https://en.onepiece-cardgame.com/events/regional-season2-26-27.html"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "INSERISCI_QUI_IL_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID", "INSERISCI_QUI_IL_CHAT_ID")
 STATE_FILE = Path("known_events.json")
